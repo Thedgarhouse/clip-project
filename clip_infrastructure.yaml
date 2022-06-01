@@ -1,0 +1,216 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >-
+  Deploy infrastructure for Clip Devops challenge, in this case an RDS MySQL database in a subnet, with an EC2 instance
+  in another subnet.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: ID for the AWS VPC to use
+  DBInstanceClass:
+    Default: db.t3.small
+    Description: DB instance class
+    Type: String
+    ConstraintDescription: Must select a valid DB instance type.
+  DBUsername:
+    NoEcho: 'true'
+    Description: Username for MySQL database access
+    Type: String
+    MinLength: '1'
+    MaxLength: '16'
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+  DBPassword:
+    NoEcho: 'true'
+    Description: Password MySQL database access
+    Type: String
+    MinLength: '8'
+    MaxLength: '41'
+    AllowedPattern: '[a-zA-Z0-9]*'
+    ConstraintDescription: must contain only alphanumeric characters.
+  InstanceTypeParameter:
+    Type: String
+    Default: t2.micro
+    AllowedValues:
+      - t2.micro
+      - m1.small
+      - m1.large
+    Description: Enter t2.micro, m1.small, or m1.large. Default is t2.micro.
+  InstanceAMI:
+    Type: String
+    Description: AMI for EC2 instance
+
+Resources:
+  Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: 172.31.32.0/28
+      AvailabilityZone: "us-west-1b"
+  Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      CidrBlock: 172.31.32.16/28
+      AvailabilityZone: "us-west-1c"
+  MyRDSSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet Group for RDS Aurora Cluster
+      SubnetIds:
+        - !Ref Subnet1
+        - !Ref Subnet2
+  MyRDSCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      DBSubnetGroupName: !Ref MyRDSSubnetGroup
+      MasterUserPassword: !Ref DBPassword
+      MasterUsername: !Ref DBUsername
+      Engine: aurora-mysql
+  MyDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref MyRDSCluster
+      DBInstanceClass: !Ref DBInstanceClass
+      DBSubnetGroupName: !Ref MyRDSSubnetGroup
+      Engine: aurora-mysql
+      PubliclyAccessible: "false"
+  NewKeyPair:
+    Type: 'AWS::EC2::KeyPair'
+    Properties:
+      KeyName: MyKeyPair
+  MyEC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: MyDB
+    Metadata:
+      AWS::Cloudformation::Init:
+        configSets:
+          Install:
+            - Database
+        Database:
+          packages:
+            yum:
+              mysql: [ ]
+              mysql-libs: [ ]
+          files:
+            /tmp/mysql-schema-create.sql:
+              content: !Sub |
+                CREATE DATABASE test;
+                CREATE USER 'test_user' IDENTIFIED BY 'test_password';
+                GRANT ALL ON test.* TO 'test_user';
+                USE test;
+                CREATE TABLE pet(name VARCHAR(20),
+                owner VARCHAR(20),
+                species VARCHAR(20),
+                sex CHAR(1)
+                );
+              mode: '000644'
+              owner: 'root'
+              group: 'root'
+          commands:
+            '01_runQuery':
+              command: !Join
+                - ''
+                - - 'mysql -u '
+                  - !Ref 'DBUsername'
+                  - ' --password='''
+                  - !Ref 'DBPassword'
+                  - ''''
+                  - ' -h '
+                  - !GetAtt 'MyDB.Endpoint.Address'
+                  - " < /tmp/mysql-schema-create.sql || error_exit 'Failed to create database user'\n"
+            '02_cleanup':
+              command: sudo rm -f /tmp/mysql-schema-create.sql
+    Properties:
+      ImageId: !Ref InstanceAMI
+      InstanceType: !Ref InstanceTypeParameter
+      KeyName: !Ref NewKeyPair
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "false"
+          DeviceIndex: "0"
+          SubnetId: !Ref Subnet2
+      UserData: !Base64
+        Fn::Join:
+          - ''
+          - - "#!/bin/bash\n"
+            - "yum update -y aws-cfn-bootstrap\n"
+            - yum update -y
+            - "\n"
+            - '/opt/aws/bin/cfn-init -v '
+            - '--stack '
+            - !Ref 'AWS::StackName'
+            - ' '
+            - '--resource MyEC2Instance '
+            - '--configsets Database '
+            - '--region '
+            - !Ref 'AWS::Region'
+            - "\n"
+            - '/opt/aws/bin/cfn-signal -e $? --stack '
+            - !Ref 'AWS::StackName'
+            - ' --resource MyEC2Instance --region '
+            - !Ref 'AWS::Region'
+            - "\n"
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'
+        Timeout: PT10M
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:*
+                Resource: arn:aws:logs:*:*:*
+  MyLambdaAPI:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: lambda_handler
+      Environment:
+        Variables:
+          databaseHost: !GetAtt MyDB.Endpoint.Address
+      Code:
+        ZipFile: |
+          from flask import Flask, render_template, request 
+          from flask_mysqldb import MySQL
+          
+          app = Flask(__name__)
+          
+          databaseHost = os.environ.get('databaseHost')
+          
+          
+          app.config['MYSQL_HOST'] = databaseHost
+          app.config['MYSQL_USER'] = 'test_user'
+          app.config['MYSQL_PASSWORD'] = 'test_password'
+          app.config['MYSQL_DB'] = 'test'
+          
+          mysql = MySQL(app)
+          
+          
+          @app.route('/api/pet/<name>', methods=['GET'])
+          def user(name):
+              cur = mysql.connection.cursor()
+              cur.execute("SELECT name, owner, species FROM pet WHERE name = (%s)", name)
+              results = cur.fetchall()
+              return(results)
+          
+          
+          if __name__ == '__main__':
+              app.run()

@@ -1,0 +1,22 @@
+[
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "vpc-0dff2e4b98ada9d32",
+    "UsePreviousValue": false
+  },
+  {
+    "ParameterKey": "DBPassword",
+    "ParameterValue": "SecretPassword01",
+    "UsePreviousValue": false
+  },
+  {
+    "ParameterKey": "DBUsername",
+    "ParameterValue": "master",
+    "UsePreviousValue": false
+  },
+  {
+    "ParameterKey": "InstanceAMI",
+    "ParameterValue": "ami-02541b8af977f6cdd",
+    "UsePreviousValue": false
+  }
+]
